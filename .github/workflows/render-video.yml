@@ -1,0 +1,109 @@
+name: Render Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      num_workers:
+        description: 'Number of parallel workers (recommended: 10-20)'
+        required: true
+        default: '10'
+        type: string
+      composition:
+        description: 'Remotion composition ID'
+        required: true
+        default: 'NewsVideo'
+        type: string
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.calc.outputs.matrix }}
+      total_frames: ${{ steps.calc.outputs.total_frames }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download public assets
+        run: |
+          RELEASE_URL=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest \
+            | grep "browser_download_url.*public.zip" \
+            | cut -d '"' -f 4)
+          curl -L -o public.zip "$RELEASE_URL"
+          unzip -o public.zip -d public/
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm ci
+      - name: Calculate frame ranges
+        id: calc
+        run: |
+          TOTAL=$(node -e "const d=require('./public/scenes.json');console.log(Math.ceil(d.duration*30));")
+          echo "total_frames=$TOTAL" >> $GITHUB_OUTPUT
+          NUM_WORKERS=${{ inputs.num_workers }}
+          FPW=$(( (TOTAL + NUM_WORKERS - 1) / NUM_WORKERS ))
+          MATRIX="["
+          for i in $(seq 0 $((NUM_WORKERS - 1))); do
+            START=$((i * FPW))
+            END=$(( (i + 1) * FPW - 1 ))
+            [ $END -ge $TOTAL ] && END=$((TOTAL - 1))
+            [ $START -ge $TOTAL ] && break
+            [ "$MATRIX" != "[" ] && MATRIX="$MATRIX,"
+            MATRIX="$MATRIX{\"index\":$i,\"start\":$START,\"end\":$END}"
+          done
+          echo "matrix=${MATRIX}]" >> $GITHUB_OUTPUT
+
+  render:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        chunk: ${{ fromJson(needs.setup.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download public assets
+        run: |
+          RELEASE_URL=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest \
+            | grep "browser_download_url.*public.zip" \
+            | cut -d '"' -f 4)
+          curl -L -o public.zip "$RELEASE_URL"
+          unzip -o public.zip -d public/
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Ensure Chrome
+        run: npx remotion browser ensure
+      - name: Render chunk ${{ matrix.chunk.index }}
+        run: |
+          npx remotion render ${{ inputs.composition }} chunk_${{ matrix.chunk.index }}.mp4 \
+            --frames=${{ matrix.chunk.start }}-${{ matrix.chunk.end }} \
+            --concurrency=2 --image-format=jpeg --video-bitrate=8M --codec=h264 --overwrite
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.chunk.index }}
+          path: chunk_${{ matrix.chunk.index }}.mp4
+          retention-days: 1
+
+  stitch:
+    needs: [setup, render]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chunk-*
+          path: chunks/
+      - name: Stitch
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          for f in $(find chunks/ -name "*.mp4" | sort -t_ -k2 -n); do
+            echo "file '$(pwd)/$f'" >> list.txt
+          done
+          ffmpeg -y -f concat -safe 0 -i list.txt -c copy output.mp4
+          echo "Size: $(du -h output.mp4 | cut -f1)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rendered-video
+          path: output.mp4
+          retention-days: 7
