@@ -29,10 +29,22 @@ jobs:
             | cut -d '"' -f 4)
           curl -L -o public.zip "$RELEASE_URL"
           unzip -o public.zip -d public/
+      - name: Cache public assets
+        uses: actions/cache@v4
+        with:
+          path: public/
+          key: public-assets-${{ github.run_id }}
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-22-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-22-
       - name: Install dependencies
         run: npm ci
       - name: Calculate frame ranges
@@ -62,16 +74,30 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
-      - name: Download public assets
+      - name: Restore public assets cache
+        uses: actions/cache@v4
+        with:
+          path: public/
+          key: public-assets-${{ github.run_id }}
+      - name: Download public assets (fallback if cache miss)
         run: |
-          RELEASE_URL=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest \
-            | grep "browser_download_url.*public.zip" \
-            | cut -d '"' -f 4)
-          curl -L -o public.zip "$RELEASE_URL"
-          unzip -o public.zip -d public/
+          if [ ! -f public/scenes.json ]; then
+            RELEASE_URL=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest \
+              | grep "browser_download_url.*public.zip" \
+              | cut -d '"' -f 4)
+            curl -L -o public.zip "$RELEASE_URL"
+            unzip -o public.zip -d public/
+          fi
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-22-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-22-
       - run: npm ci
       - name: Ensure Chrome
         run: npx remotion browser ensure
